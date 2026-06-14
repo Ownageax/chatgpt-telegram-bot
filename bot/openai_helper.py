@@ -100,6 +100,14 @@ def default_max_tokens(model: str) -> int:
     return base * 2
 
 
+def uses_max_completion_tokens(model: str) -> bool:
+    """
+    Whether the given model requires 'max_completion_tokens' instead of
+    the legacy 'max_tokens' parameter in Chat Completions requests.
+    """
+    return model in O_MODELS or model in GPT_5_MODELS or model in GPT_5_1M_MODELS
+
+
 def are_functions_available(model: str) -> bool:
     """
     Whether the given model supports functions
@@ -285,9 +293,10 @@ class OpenAIHelper:
                     logging.warning(f'Error while summarising chat history: {str(e)}. Popping elements instead...')
                     self.conversations[chat_id] = self.conversations[chat_id][-self.config['max_history_size']:]
 
-            max_tokens_str = 'max_completion_tokens' if self.config['model'] in O_MODELS else 'max_tokens'
+            model = self.config['model'] if not self.conversations_vision[chat_id] else self.config['vision_model']
+            max_tokens_str = 'max_completion_tokens' if uses_max_completion_tokens(model) else 'max_tokens'
             common_args = {
-                'model': self.config['model'] if not self.conversations_vision[chat_id] else self.config['vision_model'],
+                'model': model,
                 'messages': self.conversations[chat_id],
                 'temperature': self.config['temperature'],
                 'n': self.config['n_choices'],
@@ -480,12 +489,13 @@ class OpenAIHelper:
 
             message = {'role':'user', 'content':content}
 
+            max_tokens_str = 'max_completion_tokens' if uses_max_completion_tokens(self.config['vision_model']) else 'max_tokens'
             common_args = {
                 'model': self.config['vision_model'],
                 'messages': self.conversations[chat_id][:-1] + [message],
                 'temperature': self.config['temperature'],
                 'n': 1, # several choices is not implemented yet
-                'max_tokens': self.config['vision_max_tokens'],
+                max_tokens_str: self.config['vision_max_tokens'],
                 'presence_penalty': self.config['presence_penalty'],
                 'frequency_penalty': self.config['frequency_penalty'],
                 'stream': stream
