@@ -1,6 +1,7 @@
 from __future__ import annotations
 import datetime
 import logging
+import math
 import os
 
 import tiktoken
@@ -24,10 +25,46 @@ GPT_3_16K_MODELS = ("gpt-3.5-turbo-16k", "gpt-3.5-turbo-16k-0613", "gpt-3.5-turb
 GPT_4_MODELS = ("gpt-4", "gpt-4-0314", "gpt-4-0613", "gpt-4-turbo-preview")
 GPT_4_32K_MODELS = ("gpt-4-32k", "gpt-4-32k-0314", "gpt-4-32k-0613")
 GPT_4_VISION_MODELS = ("gpt-4o",)
+# GPT-5 family vision models use patch-based (32x32px) image tokenization instead
+# of gpt-4o's tile-based scheme. Multiplier converts the (possibly downscaled)
+# patch count into tokens; "full size" models (gpt-5, gpt-5.4, gpt-5.5) use 1.0.
+GPT_5_VISION_MODELS = ("gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.5")
+GPT_5_VISION_TOKEN_MULTIPLIERS = {
+    "gpt-5-mini": 1.62, "gpt-5.4-mini": 1.62,
+    "gpt-5-nano": 2.46, "gpt-5.4-nano": 2.46,
+}
+GPT_5_VISION_MAX_PATCHES = {
+    "gpt-5-mini": 1536, "gpt-5-nano": 1536,
+    "gpt-5.4-mini": 1536, "gpt-5.4-nano": 1536,
+    "gpt-5.4": 2500, "gpt-5.5": 2500,
+    "gpt-5": 1536,
+}
+# gpt-5.4 and gpt-5.5 also support "original" detail with a larger patch budget.
+GPT_5_VISION_ORIGINAL_MAX_PATCHES = 10000
 GPT_4_128K_MODELS = ("gpt-4-1106-preview", "gpt-4-0125-preview", "gpt-4-turbo-preview", "gpt-4-turbo", "gpt-4-turbo-2024-04-09")
 GPT_4O_MODELS = ("gpt-4o", "gpt-4o-mini", "chatgpt-4o-latest")
-O_MODELS = ("o1", "o1-mini", "o1-preview")
-GPT_ALL_MODELS = GPT_3_MODELS + GPT_3_16K_MODELS + GPT_4_MODELS + GPT_4_32K_MODELS + GPT_4_VISION_MODELS + GPT_4_128K_MODELS + GPT_4O_MODELS + O_MODELS
+# "Newer" ChatGPT-family models.
+# Note: This project mostly uses Chat Completions; some reasoning models may not support
+# function-calling the same way, so we treat them as "no functions" by default.
+GPT_4_1_MODELS = ("gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano")
+GPT_5_MODELS = ("gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-5-2025-08-07")
+# GPT-5.4 / GPT-5.5 support a 1M token context window.
+GPT_5_1M_MODELS = ("gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.5")
+O_MODELS = ("o1", "o1-mini", "o1-preview", "o3", "o3-mini", "o4-mini")
+
+GPT_ALL_MODELS = (
+    GPT_3_MODELS
+    + GPT_3_16K_MODELS
+    + GPT_4_MODELS
+    + GPT_4_32K_MODELS
+    + GPT_4_VISION_MODELS
+    + GPT_4_128K_MODELS
+    + GPT_4O_MODELS
+    + GPT_4_1_MODELS
+    + GPT_5_MODELS
+    + GPT_5_1M_MODELS
+    + O_MODELS
+)
 
 def default_max_tokens(model: str) -> int:
     """
@@ -52,8 +89,15 @@ def default_max_tokens(model: str) -> int:
         return 4096
     elif model in GPT_4O_MODELS:
         return 4096
+    elif model in GPT_4_1_MODELS:
+        return 4096
+    elif model in GPT_5_MODELS:
+        return 4096
+    elif model in GPT_5_1M_MODELS:
+        return 4096
     elif model in O_MODELS:
         return 4096
+    return base * 2
 
 
 def are_functions_available(model: str) -> bool:
@@ -632,6 +676,12 @@ class OpenAIHelper:
             return base * 31
         if self.config['model'] in GPT_4O_MODELS:
             return base * 31
+        if self.config['model'] in GPT_4_1_MODELS:
+            return base * 31
+        if self.config['model'] in GPT_5_MODELS:
+            return base * 31
+        if self.config['model'] in GPT_5_1M_MODELS:
+            return 1_000_000
         elif self.config['model'] in O_MODELS:
             # https://platform.openai.com/docs/models#o1
             if self.config['model'] == "o1":
@@ -640,9 +690,8 @@ class OpenAIHelper:
                 return 32_768
             else:
                 return 65_536
-        raise NotImplementedError(
-            f"Max tokens for model {self.config['model']} is not implemented yet."
-        )
+        # Fallback: avoid crashing on newly released models.
+        return base * 31
 
     # https://github.com/openai/openai-cookbook/blob/main/examples/How_to_count_tokens_with_tiktoken.ipynb
     def __count_tokens(self, messages) -> int:
@@ -657,11 +706,10 @@ class OpenAIHelper:
         except KeyError:
             encoding = tiktoken.get_encoding("o200k_base")
 
-        if model in GPT_ALL_MODELS:
-            tokens_per_message = 3
-            tokens_per_name = 1
-        else:
-            raise NotImplementedError(f"""num_tokens_from_messages() is not implemented for model {model}.""")
+        # For most chat-style models, this approximation is good enough for budgeting/truncation.
+        # New models are frequently released; prefer a safe fallback over crashing.
+        tokens_per_message = 3
+        tokens_per_name = 1
         num_tokens = 0
         for message in messages:
             num_tokens += tokens_per_message
@@ -694,9 +742,13 @@ class OpenAIHelper:
         image_file = io.BytesIO(image_bytes)
         image = Image.open(image_file)
         model = self.config['vision_model']
+
+        if model in GPT_5_VISION_MODELS:
+            return self.__count_tokens_vision_patches(image)
+
         if model not in GPT_4_VISION_MODELS:
             raise NotImplementedError(f"""count_tokens_vision() is not implemented for model {model}.""")
-        
+
         w, h = image.size
         if w > h: w, h = h, w
         # this computation follows https://platform.openai.com/docs/guides/vision and https://openai.com/pricing#gpt-4-turbo
@@ -714,6 +766,30 @@ class OpenAIHelper:
             return num_tokens
         else:
             raise NotImplementedError(f"""unknown parameter detail={detail} for model {model}.""")
+
+    def __count_tokens_vision_patches(self, image: Image.Image) -> int:
+        """
+        Counts the number of tokens for interpreting an image with a GPT-5 family
+        (patch-based) vision model.
+        https://platform.openai.com/docs/guides/images-vision
+        """
+        model = self.config['vision_model']
+        detail = self.config['vision_detail']
+
+        max_patches = GPT_5_VISION_MAX_PATCHES[model]
+        if detail == 'original' or (detail == 'auto' and model in ('gpt-5.4', 'gpt-5.5')):
+            if model in ('gpt-5.4', 'gpt-5.5'):
+                max_patches = GPT_5_VISION_ORIGINAL_MAX_PATCHES
+
+        w, h = image.size
+        patches = math.ceil(w / 32) * math.ceil(h / 32)
+        if patches > max_patches:
+            scale = math.sqrt(max_patches / patches)
+            w, h = max(1, int(w * scale)), max(1, int(h * scale))
+            patches = math.ceil(w / 32) * math.ceil(h / 32)
+
+        multiplier = GPT_5_VISION_TOKEN_MULTIPLIERS.get(model, 1.0)
+        return math.ceil(patches * multiplier)
 
     # No longer works as of July 21st 2023, as OpenAI has removed the billing API
     # def get_billing_current_month(self):
