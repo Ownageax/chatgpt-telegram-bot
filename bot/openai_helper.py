@@ -1,4 +1,5 @@
 from __future__ import annotations
+import base64
 import datetime
 import logging
 import math
@@ -375,22 +376,30 @@ class OpenAIHelper:
         )
         return await self.__handle_function_call(chat_id, response, stream, times + 1, plugins_used)
 
-    async def generate_image(self, prompt: str) -> tuple[str, str]:
+    async def generate_image(self, prompt: str) -> tuple[str | io.BytesIO, str]:
         """
-        Generates an image from the given prompt using DALL·E model.
+        Generates an image from the given prompt using the configured image model.
         :param prompt: The prompt to send to the model
-        :return: The image URL and the image size
+        :return: The image (a URL for dall-e models, or image bytes for gpt-image models) and the image size
         """
         bot_language = self.config['bot_language']
         try:
-            response = await self.client.images.generate(
-                prompt=prompt,
-                n=1,
-                model=self.config['image_model'],
-                quality=self.config['image_quality'],
-                style=self.config['image_style'],
-                size=self.config['image_size']
-            )
+            params = {
+                'prompt': prompt,
+                'n': 1,
+                'model': self.config['image_model'],
+                'size': self.config['image_size'],
+            }
+
+            if self.config['image_model'].startswith('gpt-image') or self.config['image_model'] == 'chatgpt-image-latest':
+                # GPT image models don't support 'style' and only accept low/medium/high/auto for quality
+                if self.config['image_quality'] in ('low', 'medium', 'high', 'auto'):
+                    params['quality'] = self.config['image_quality']
+            else:
+                params['quality'] = self.config['image_quality']
+                params['style'] = self.config['image_style']
+
+            response = await self.client.images.generate(**params)
 
             if len(response.data) == 0:
                 logging.error(f'No response from GPT: {str(response)}')
@@ -399,7 +408,12 @@ class OpenAIHelper:
                     f"⚠️\n{localized_text('try_again', bot_language)}."
                 )
 
-            return response.data[0].url, self.config['image_size']
+            image = response.data[0]
+            if image.url:
+                return image.url, self.config['image_size']
+
+            # GPT image models always return base64-encoded images
+            return io.BytesIO(base64.b64decode(image.b64_json)), self.config['image_size']
         except Exception as e:
             raise Exception(f"⚠️ _{localized_text('error', bot_language)}._ ⚠️\n{str(e)}") from e
 
