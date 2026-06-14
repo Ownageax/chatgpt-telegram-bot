@@ -9,6 +9,10 @@ def year_month(date_str):
     return str(date_str)[:7]
 
 
+# Order must match the comma-separated values of the TTS_PRICES env var.
+TTS_MODELS = ['tts-1', 'tts-1-hd', 'gpt-4o-mini-tts']
+
+
 class UsageTracker:
     """
     UsageTracker class
@@ -199,8 +203,7 @@ class UsageTracker:
     # tts usage functions:
 
     def add_tts_request(self, text_length, tts_model, tts_prices):
-        tts_models = ['tts-1', 'tts-1-hd']
-        price = tts_prices[tts_models.index(tts_model)]
+        price = tts_prices[TTS_MODELS.index(tts_model)] if tts_model in TTS_MODELS else tts_prices[0]
         today = date.today()
         tts_price = round(text_length * price / 1000, 2)
         self.add_current_costs(tts_price)
@@ -229,17 +232,16 @@ class UsageTracker:
         :return: total amount of characters converted to speech per day and per month
         """
 
-        tts_models = ['tts-1', 'tts-1-hd']
         today = date.today()
         characters_day = 0
-        for tts_model in tts_models:
+        for tts_model in TTS_MODELS:
             if tts_model in self.usage["usage_history"]["tts_characters"] and \
                 str(today) in self.usage["usage_history"]["tts_characters"][tts_model]:
                 characters_day += self.usage["usage_history"]["tts_characters"][tts_model][str(today)]
 
         month = str(today)[:7]  # year-month as string
         characters_month = 0
-        for tts_model in tts_models:
+        for tts_model in TTS_MODELS:
             if tts_model in self.usage["usage_history"]["tts_characters"]: 
                 for today, characters in self.usage["usage_history"]["tts_characters"][tts_model].items():
                     if today.startswith(month):
@@ -332,7 +334,7 @@ class UsageTracker:
         cost_all_time = self.usage["current_cost"].get("all_time", self.initialize_all_time_cost())
         return {"cost_today": cost_day, "cost_month": cost_month, "cost_all_time": cost_all_time}
 
-    def initialize_all_time_cost(self, tokens_price=0.002, image_prices="0.016,0.018,0.02", minute_price=0.006, vision_token_price=0.01, tts_prices='0.015,0.030'):
+    def initialize_all_time_cost(self, tokens_price=0.002, image_prices="0.016,0.018,0.02", minute_price=0.006, vision_token_price=0.01, tts_prices='0.015,0.030,0.02'):
         """Get total USD amount of all requests in history
         
         :param tokens_price: price per 1000 tokens, defaults to 0.002
@@ -356,9 +358,13 @@ class UsageTracker:
         total_vision_tokens = sum(self.usage['usage_history']['vision_tokens'].values())
         vision_cost = round(total_vision_tokens * vision_token_price / 1000, 2)
 
-        total_characters = [sum(tts_model.values()) for tts_model in self.usage['usage_history']['tts_characters'].values()]
         tts_prices_list = [float(x) for x in tts_prices.split(',')]
-        tts_cost = round(sum([count * price / 1000 for count, price in zip(total_characters, tts_prices_list)]), 2)
+        tts_cost = 0.0
+        for tts_model, dates in self.usage['usage_history']['tts_characters'].items():
+            characters = sum(dates.values())
+            price = tts_prices_list[TTS_MODELS.index(tts_model)] if tts_model in TTS_MODELS else tts_prices_list[0]
+            tts_cost += characters * price / 1000
+        tts_cost = round(tts_cost, 2)
 
         all_time_cost = token_cost + transcription_cost + image_cost + vision_cost + tts_cost
         return all_time_cost
